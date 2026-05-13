@@ -1,0 +1,20 @@
+[package]
+name = "scatto"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "X11 popup that toggles with Super+D, lists desktops + apps, and moves windows by drag or vim keys"
+
+[dependencies]
+anyhow = "1"
+x11rb = { version = "0.13", features = ["randr", "image"] }
+cairo-rs = "0.20"
+pango = "0.20"
+pangocairo = "0.20"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
