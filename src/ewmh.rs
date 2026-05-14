@@ -4,11 +4,10 @@
 use anyhow::{anyhow, Context, Result};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, GetPropertyReply, PropMode,
-    Window, CLIENT_MESSAGE_EVENT,
+    AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, GetPropertyReply, Window,
+    CLIENT_MESSAGE_EVENT,
 };
 use x11rb::rust_connection::RustConnection;
-use x11rb::wrapper::ConnectionExt as _;
 
 const SOURCE_PAGER: u32 = 2;
 
@@ -71,9 +70,9 @@ pub struct WindowInfo {
 }
 
 pub struct Ewmh<'a> {
-    pub conn: &'a RustConnection,
-    pub root: Window,
-    pub atoms: &'a Atoms,
+    conn: &'a RustConnection,
+    root: Window,
+    atoms: &'a Atoms,
 }
 
 impl<'a> Ewmh<'a> {
@@ -91,7 +90,7 @@ impl<'a> Ewmh<'a> {
         Ok(read_u32(&r).unwrap_or(0))
     }
 
-    pub fn desktop_names(&self) -> Result<Vec<String>> {
+    fn desktop_names(&self) -> Result<Vec<String>> {
         let r = self.get_prop(self.root, self.atoms.net_desktop_names, self.atoms.utf8_string, u32::MAX / 4)?;
         if r.value_len == 0 {
             return Ok(Vec::new());
@@ -130,7 +129,7 @@ impl<'a> Ewmh<'a> {
         Ok(read_u32(&r).filter(|w| *w != 0))
     }
 
-    pub fn client_list(&self) -> Result<Vec<Window>> {
+    fn client_list(&self) -> Result<Vec<Window>> {
         // Prefer stacking order (top-of-stack last) so the per-desktop list
         // reflects the user's recency.
         let r = self.get_prop(
@@ -280,21 +279,6 @@ impl<'a> Ewmh<'a> {
             .map_err(|e| anyhow!("get_property reply: {e}"))
     }
 
-    pub fn set_wm_class(&self, w: Window, instance: &str, class: &str) -> Result<()> {
-        let mut data: Vec<u8> = Vec::with_capacity(instance.len() + class.len() + 2);
-        data.extend_from_slice(instance.as_bytes());
-        data.push(0);
-        data.extend_from_slice(class.as_bytes());
-        data.push(0);
-        self.conn.change_property8(
-            PropMode::REPLACE,
-            w,
-            AtomEnum::WM_CLASS,
-            AtomEnum::STRING,
-            &data,
-        )?;
-        Ok(())
-    }
 }
 
 fn read_u32(r: &GetPropertyReply) -> Option<u32> {

@@ -22,12 +22,12 @@ pub struct Geometry {
 pub struct Popup {
     pub conn: RustConnection,
     pub root: Window,
-    pub win: Window,
-    pub gc: u32,
     pub w: u16,
     pub h: u16,
-    pub depth: u8,
-    pub byte_order: XImageOrder,
+    win: Window,
+    gc: u32,
+    depth: u8,
+    byte_order: XImageOrder,
 }
 
 impl Popup {

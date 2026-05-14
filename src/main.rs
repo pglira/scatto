@@ -19,16 +19,16 @@ use crate::config::Config;
 use crate::ewmh::{Atoms, DesktopInfo, Ewmh, WindowInfo};
 use crate::keymap::{Key, Keymap};
 use crate::popup::Popup;
-use crate::render::{DragOverlay, Layout, Renderer, Row};
+use crate::render::{capitalize, DragOverlay, Layout, Renderer, Row};
 
 fn main() -> Result<()> {
     let arg = std::env::args().nth(1).unwrap_or_default();
     match arg.as_str() {
         "" | "popup" => run_popup(),
-        "switch-next" => action_switch(1),
-        "switch-prev" => action_switch(-1),
-        "move-next" => action_move(1),
-        "move-prev" => action_move(-1),
+        "switch-next" => action(1, false),
+        "switch-prev" => action(-1, false),
+        "move-next" => action(1, true),
+        "move-prev" => action(-1, true),
         "print-config" => {
             print!("{}", crate::config::DEFAULT_CONFIG);
             Ok(())
@@ -53,7 +53,7 @@ fn main() -> Result<()> {
 
 // -- direct actions (for WM keybindings without opening the popup) ------------
 
-fn action_switch(delta: i32) -> Result<()> {
+fn action(delta: i32, take_active: bool) -> Result<()> {
     let (conn, screen_num) = RustConnection::connect(None).context("X11 connect")?;
     let root = conn.setup().roots[screen_num].root;
     let atoms = Atoms::new(&conn)?;
@@ -64,23 +64,10 @@ fn action_switch(delta: i32) -> Result<()> {
     }
     let cur = ew.current_desktop()? as i32;
     let next = ((cur + delta).rem_euclid(n as i32)) as u32;
-    ew.switch_desktop(next, x11rb::CURRENT_TIME)?;
-    Ok(())
-}
-
-fn action_move(delta: i32) -> Result<()> {
-    let (conn, screen_num) = RustConnection::connect(None).context("X11 connect")?;
-    let root = conn.setup().roots[screen_num].root;
-    let atoms = Atoms::new(&conn)?;
-    let ew = Ewmh::new(&conn, root, &atoms);
-    let n = ew.number_of_desktops()?;
-    if n == 0 {
-        return Ok(());
-    }
-    let cur = ew.current_desktop()? as i32;
-    let next = ((cur + delta).rem_euclid(n as i32)) as u32;
-    if let Some(active) = ew.active_window()? {
-        ew.move_window_to_desktop(active, next)?;
+    if take_active {
+        if let Some(active) = ew.active_window()? {
+            ew.move_window_to_desktop(active, next)?;
+        }
     }
     ew.switch_desktop(next, x11rb::CURRENT_TIME)?;
     Ok(())
@@ -89,24 +76,20 @@ fn action_move(delta: i32) -> Result<()> {
 // -- popup --------------------------------------------------------------------
 
 struct State {
+    cfg: Config,
     desktops: Vec<DesktopInfo>,
     windows: Vec<WindowInfo>,
     current_desktop: u32,
     focused_window: Option<u32>,
     cursor: usize,
     scroll: f64,
-    drag: Option<Drag>,
     viewport_h: f64,
-    /// Vertical padding above the first row and below the last row.
-    /// Set to `cfg.border_thickness` so rows sit flush against the border.
-    pad_y: f64,
-    header_h: f64,
-    app_h: f64,
-    /// True after the first `d` of a vim-style `dd` close-window chord.
-    /// Any non-`d` keypress clears it; the second `d` closes the selected
-    /// app's window. `d` with Super held is the popup-toggle and bypasses this.
+    drag: Option<Drag>,
+    /// True after the first `d` of vim-style `dd` (close window). Cleared by
+    /// any non-`d` press; the second `d` closes the app at the cursor. `d`
+    /// with Super held is the popup-toggle and bypasses this entirely.
     pending_dd: bool,
-    /// True after the first `g` of a vim-style `gg` jump-to-top chord.
+    /// True after the first `g` of vim-style `gg` (jump to top).
     pending_gg: bool,
     /// True while the F1 key-bindings overlay is shown.
     show_help: bool,
@@ -119,141 +102,278 @@ struct Drag {
     cursor_x: i32,
     cursor_y: i32,
     target_desktop: Option<u32>,
-    started: bool, // true once mouse has moved past a small threshold
     press_x: i32,
     press_y: i32,
+    /// Latched true once the cursor has moved past a small threshold; below
+    /// that we treat the gesture as a click instead.
+    started: bool,
 }
 
-fn run_popup() -> Result<()> {
-    let cfg = Config::load()?;
+impl Drag {
+    fn moved_enough(&self) -> bool {
+        let dx = self.cursor_x - self.press_x;
+        let dy = self.cursor_y - self.press_y;
+        dx * dx + dy * dy > 16
+    }
+}
 
-    // Snapshot everything via a temporary connection BEFORE opening the popup,
-    // so _NET_ACTIVE_WINDOW still reflects the user's previously focused app.
-    let (desktops, windows, current_desktop, focused_window) = {
+impl State {
+    /// Open a temporary X11 connection, snapshot the WM state, drop the
+    /// connection. Done BEFORE opening the popup so `_NET_ACTIVE_WINDOW` still
+    /// reflects the app the user had focused.
+    fn snapshot(cfg: Config) -> Result<Self> {
         let (conn, screen_num) = RustConnection::connect(None).context("X11 connect")?;
         let root = conn.setup().roots[screen_num].root;
         let atoms = Atoms::new(&conn)?;
         let ew = Ewmh::new(&conn, root, &atoms);
-        (
-            ew.desktops()?,
-            ew.windows()?,
-            ew.current_desktop()?,
-            ew.active_window().ok().flatten(),
+        Ok(Self {
+            cfg,
+            desktops: ew.desktops()?,
+            windows: ew.windows()?,
+            current_desktop: ew.current_desktop()?,
+            focused_window: ew.active_window().ok().flatten(),
+            cursor: 0,
+            scroll: 0.0,
+            viewport_h: 0.0,
+            drag: None,
+            pending_dd: false,
+            pending_gg: false,
+            show_help: false,
+        })
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::build(
+            &self.desktops,
+            &self.windows,
+            self.current_desktop,
+            self.focused_window,
+            self.cfg.border_thickness,
+            self.cfg.header_height,
+            self.cfg.app_height,
         )
-    };
+    }
 
-    let mut state = State {
-        desktops,
-        windows,
-        current_desktop,
-        focused_window,
-        cursor: 0,
-        scroll: 0.0,
-        drag: None,
-        viewport_h: 0.0,
-        pad_y: cfg.border_thickness,
-        header_h: cfg.header_height,
-        app_h: cfg.app_height,
-        pending_dd: false,
-        pending_gg: false,
-        show_help: false,
-    };
+    /// Best initial cursor: the row of the previously focused app if visible,
+    /// otherwise the header of the current desktop, otherwise the top.
+    fn initial_cursor(&self, layout: &Layout) -> usize {
+        if let Some(f) = self.focused_window {
+            for (i, row) in layout.rows.iter().enumerate() {
+                if let Row::App { window_idx, .. } = row {
+                    if self.windows[*window_idx].id == f {
+                        return i;
+                    }
+                }
+            }
+        }
+        for (i, row) in layout.rows.iter().enumerate() {
+            if let Row::Header { desktop_idx, .. } = row {
+                if self.desktops[*desktop_idx].index == self.current_desktop {
+                    return i;
+                }
+            }
+        }
+        0
+    }
 
-    let layout = Layout::build(
-        &state.desktops,
-        &state.windows,
-        state.current_desktop,
-        state.focused_window,
-        state.pad_y,
-        state.header_h,
-        state.app_h,
-    );
-    state.cursor = initial_cursor(
-        &layout,
-        &state.desktops,
-        &state.windows,
-        state.focused_window,
-        state.current_desktop,
-    );
+    fn ensure_cursor_visible(&mut self, layout: &Layout) {
+        if layout.rows.is_empty() {
+            self.cursor = 0;
+            self.scroll = 0.0;
+            return;
+        }
+        if self.cursor >= layout.rows.len() {
+            self.cursor = layout.rows.len() - 1;
+        }
+        let y = layout.row_y[self.cursor];
+        let h = layout.row_h[self.cursor];
+        if y < self.scroll {
+            self.scroll = y;
+        } else if y + h > self.scroll + self.viewport_h {
+            self.scroll = y + h - self.viewport_h;
+        }
+        let max_scroll = (layout.content_h - self.viewport_h).max(0.0);
+        self.scroll = self.scroll.clamp(0.0, max_scroll);
+    }
 
-    let content_h = (layout.content_h.ceil() as u16).max((state.header_h + state.pad_y * 2.0) as u16);
-    let height = content_h.min(cfg.max_height);
+    fn move_cursor(&mut self, delta: i32) {
+        let layout = self.layout();
+        let n = layout.rows.len() as i32;
+        if n == 0 {
+            return;
+        }
+        self.cursor = (self.cursor as i32 + delta).clamp(0, n - 1) as usize;
+        self.ensure_cursor_visible(&layout);
+    }
+
+    fn jump_to(&mut self, idx: usize) {
+        let layout = self.layout();
+        if layout.rows.is_empty() {
+            return;
+        }
+        self.cursor = idx.min(layout.rows.len() - 1);
+        self.ensure_cursor_visible(&layout);
+    }
+
+    /// Return the window index of the row under the cursor, or None if the
+    /// cursor is on a header.
+    fn cursor_window_idx(&self) -> Option<usize> {
+        match self.layout().rows.get(self.cursor)? {
+            Row::App { window_idx, .. } => Some(*window_idx),
+            Row::Header { .. } => None,
+        }
+    }
+
+    /// Slide the cursor onto the row that hosts `window_idx`, then rescroll.
+    /// No-op if the window is gone.
+    fn snap_cursor_to_window(&mut self, window_idx: usize) {
+        let layout = self.layout();
+        for (i, row) in layout.rows.iter().enumerate() {
+            if let Row::App { window_idx: wi, .. } = row {
+                if *wi == window_idx {
+                    self.cursor = i;
+                    break;
+                }
+            }
+        }
+        self.ensure_cursor_visible(&layout);
+    }
+
+    /// Move the app at `window_idx` `delta` desktops. With `follow`, also
+    /// switches to that desktop so the popup stays open and the user can keep
+    /// shoving the app further. EWMH "sticky" apps (`desktop == u32::MAX`) are
+    /// left alone without `follow`; with `follow`, only the desktop changes.
+    fn move_app(
+        &mut self,
+        ew: &Ewmh,
+        window_idx: usize,
+        delta: i32,
+        follow: bool,
+        time: u32,
+    ) -> Result<()> {
+        let n = self.desktops.len() as i32;
+        if n == 0 {
+            return Ok(());
+        }
+        let win = &self.windows[window_idx];
+        let sticky = win.desktop == u32::MAX;
+        if !follow && sticky {
+            return Ok(());
+        }
+        let base = if sticky { self.current_desktop } else { win.desktop } as i32;
+        let target = ((base + delta).rem_euclid(n)) as u32;
+        let win_id = win.id;
+        if !sticky && target != win.desktop {
+            ew.move_window_to_desktop(win_id, target)?;
+            self.windows[window_idx].desktop = target;
+        }
+        if follow && target != self.current_desktop {
+            ew.switch_desktop(target, time)?;
+            self.current_desktop = target;
+        }
+        self.snap_cursor_to_window(window_idx);
+        Ok(())
+    }
+
+    /// Ask the WM to close the app at `window_idx` (it gets a chance to save).
+    /// Drop the row from local state so the popup reflects the kill immediately
+    /// and the cursor walks naturally for repeated `dd`s.
+    fn close_app(&mut self, ew: &Ewmh, window_idx: usize, time: u32) -> Result<()> {
+        let win_id = self.windows[window_idx].id;
+        ew.close_window(win_id, time)?;
+        self.windows.remove(window_idx);
+        if self.focused_window == Some(win_id) {
+            self.focused_window = None;
+        }
+        let layout = self.layout();
+        if self.cursor >= layout.rows.len() {
+            self.cursor = layout.rows.len().saturating_sub(1);
+        }
+        self.ensure_cursor_visible(&layout);
+        Ok(())
+    }
+
+    fn activate_cursor(&self, ew: &Ewmh, time: u32) -> Result<()> {
+        let layout = self.layout();
+        let Some(row) = layout.rows.get(self.cursor) else {
+            return Ok(());
+        };
+        match *row {
+            Row::Header { desktop_idx, .. } => {
+                ew.switch_desktop(self.desktops[desktop_idx].index, time)?;
+            }
+            Row::App { window_idx, .. } => {
+                let win = &self.windows[window_idx];
+                // Jump to the app's desktop instead of pulling the app to the
+                // current one. u32::MAX means "sticky / on all desktops" —
+                // skip the switch in that case.
+                if win.desktop != u32::MAX && win.desktop != self.current_desktop {
+                    ew.switch_desktop(win.desktop, time)?;
+                }
+                ew.activate_window(win.id, time)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn drag_label(w: &WindowInfo) -> String {
+    if w.class.is_empty() {
+        w.title.clone()
+    } else {
+        capitalize(&w.class)
+    }
+}
+
+/// Keycodes for keys currently held — used at popup launch to swallow the
+/// autorepeat of the Super+D combo that opened us.
+fn held_keycodes(conn: &RustConnection) -> Result<Vec<u8>> {
+    let r = conn.query_keymap()?.reply()?;
+    let mut held = Vec::new();
+    for (byte, b) in r.keys.iter().enumerate() {
+        for bit in 0..8 {
+            if b & (1 << bit) != 0 {
+                held.push((byte * 8 + bit) as u8);
+            }
+        }
+    }
+    Ok(held)
+}
+
+fn run_popup() -> Result<()> {
+    let cfg = Config::load()?;
+    let mut state = State::snapshot(cfg)?;
+
+    // Size the popup to its content (capped by max_height). The +pad*2 floor
+    // guarantees room for at least one header even when there are no apps.
+    let layout = state.layout();
+    state.cursor = state.initial_cursor(&layout);
+    let min_h = state.cfg.header_height + state.cfg.border_thickness * 2.0;
+    let content_h = (layout.content_h.ceil() as u16).max(min_h as u16);
+    let height = content_h.min(state.cfg.max_height);
     state.viewport_h = height as f64;
-
-    let popup = Popup::open(cfg.width, height)?;
-    let atoms = Atoms::new(&popup.conn)?;
-    let ew_popup = Ewmh::new(&popup.conn, popup.root, &atoms);
-    let _ = ew_popup.set_wm_class(popup.win, "scatto", "scatto");
-    let keymap = Keymap::fetch(&popup.conn)?;
-    let mut renderer = Renderer::new(cfg.width as i32, height as i32);
-
-    ensure_cursor_visible(&layout, &mut state);
+    state.ensure_cursor_visible(&layout);
     drop(layout);
+
+    let popup = Popup::open(state.cfg.width, height)?;
+    let atoms = Atoms::new(&popup.conn)?;
+    let ew = Ewmh::new(&popup.conn, popup.root, &atoms);
+    let keymap = Keymap::fetch(&popup.conn)?;
+    let mut renderer = Renderer::new(state.cfg.width as i32, height as i32);
 
     // Swallow any non-modifier keys still held down at launch (the WM may
     // deliver one more KeyPress of the Super+D combo as autorepeat right after
     // we grab the keyboard, which we don't want to interpret as 'd').
-    let mut swallow: Vec<u8> = {
-        let r = popup.conn.query_keymap()?.reply()?;
-        let mut held = Vec::new();
-        for (byte, b) in r.keys.iter().enumerate() {
-            for bit in 0..8 {
-                if b & (1 << bit) != 0 {
-                    held.push((byte * 8 + bit) as u8);
-                }
-            }
-        }
-        held
-    };
-
+    let mut swallow = held_keycodes(&popup.conn)?;
     let mut needs_repaint = true;
 
     loop {
         if needs_repaint {
-            let layout = Layout::build(
-                &state.desktops,
-                &state.windows,
-                state.current_desktop,
-                state.focused_window,
-                state.pad_y,
-                state.header_h,
-                state.app_h,
-            );
-            ensure_cursor_visible(&layout, &mut state);
-            let overlay = state.drag.as_ref().and_then(|d| {
-                if !d.started {
-                    return None;
-                }
-                Some(DragOverlay {
-                    cursor_x: d.cursor_x,
-                    cursor_y: d.cursor_y,
-                    label: d.label.clone(),
-                    target_desktop: d.target_desktop,
-                })
-            });
-            let pixels = if state.show_help {
-                renderer.draw_help(&cfg)?
-            } else {
-                renderer.draw(
-                    &cfg,
-                    &layout,
-                    &state.desktops,
-                    &state.windows,
-                    state.cursor,
-                    state.scroll,
-                    overlay.as_ref(),
-                )?
-            };
-            popup.put(&pixels)?;
-            popup.flush()?;
+            repaint(&popup, &mut renderer, &state)?;
             needs_repaint = false;
         }
-
-        let event = popup.next_event()?;
-        match event {
-            Event::Expose(_) => {
-                needs_repaint = true;
-            }
+        match popup.next_event()? {
+            Event::Expose(_) => needs_repaint = true,
             Event::KeyRelease(ev) => {
                 swallow.retain(|&kc| kc != ev.detail);
             }
@@ -262,268 +382,93 @@ fn run_popup() -> Result<()> {
                     swallow.swap_remove(pos);
                     continue;
                 }
-                let state_mask = u16::from(ev.state);
-                let shift = state_mask & u16::from(KeyButMask::SHIFT) != 0;
-                let ctrl = state_mask & u16::from(KeyButMask::CONTROL) != 0;
-                let super_held = state_mask & u16::from(KeyButMask::MOD4) != 0;
-                let key = keymap.lookup(ev.detail, state_mask);
-                let layout = Layout::build(
-                    &state.desktops,
-                    &state.windows,
-                    state.current_desktop,
-                    state.focused_window,
-                    state.pad_y,
-                    state.header_h,
-                    state.app_h,
-                );
-
-                // Help overlay is modal: only F1/Esc dismiss it, and Super+D/q
-                // remain unconditional popup-closers. Everything else is ignored.
-                if state.show_help {
-                    let is_super_d = matches!(key, Key::Char(c) if c.eq_ignore_ascii_case(&'d'))
-                        && super_held;
-                    if is_super_d || matches!(key, Key::Char('q' | 'Q')) {
-                        return Ok(());
-                    }
-                    if matches!(key, Key::F1 | Key::Escape) {
-                        state.show_help = false;
-                        needs_repaint = true;
-                    }
-                    continue;
-                }
-                if matches!(key, Key::F1) {
-                    state.show_help = true;
-                    state.pending_dd = false;
-                    state.pending_gg = false;
-                    needs_repaint = true;
-                    continue;
-                }
-                if matches!(key, Key::Escape) {
-                    return Ok(());
-                }
-                // Any non-`d` keypress cancels a pending `dd`.
-                let is_plain_d = matches!(key, Key::Char(c) if c.eq_ignore_ascii_case(&'d'))
-                    && !super_held;
-                if state.pending_dd && !is_plain_d {
-                    state.pending_dd = false;
-                    needs_repaint = true;
-                }
-                // Any non-`g` keypress cancels a pending `gg`.
-                let is_plain_g = matches!(key, Key::Char('g'));
-                if state.pending_gg && !is_plain_g {
-                    state.pending_gg = false;
-                    needs_repaint = true;
-                }
-                if let Key::Char(c) = key {
-                    // gg: jump to top. G (shift+g): jump to bottom. Case-sensitive.
-                    if c == 'g' {
-                        if state.pending_gg {
-                            state.pending_gg = false;
-                            if !layout.rows.is_empty() {
-                                state.cursor = 0;
-                                ensure_cursor_visible(&layout, &mut state);
-                                needs_repaint = true;
-                            }
-                            continue;
-                        }
-                        state.pending_gg = true;
-                        needs_repaint = true;
-                        continue;
-                    }
-                    if c == 'G' {
-                        if !layout.rows.is_empty() {
-                            state.cursor = layout.rows.len() - 1;
-                            ensure_cursor_visible(&layout, &mut state);
-                            needs_repaint = true;
-                        }
-                        continue;
-                    }
-                    let lc = c.to_ascii_lowercase();
-                    if lc == 'd' {
-                        if super_held {
-                            // Super+D pressed again — toggle the popup off.
-                            return Ok(());
-                        }
-                        // Vim-style dd: first `d` arms, second `d` closes the
-                        // app at the cursor.
-                        if state.pending_dd {
-                            state.pending_dd = false;
-                            if let Some(Row::App { window_idx, .. }) = layout.rows.get(state.cursor) {
-                                let wi = *window_idx;
-                                close_selected_window(&mut state, &ew_popup, wi, ev.time)?;
-                                needs_repaint = true;
-                            }
-                            continue;
-                        }
-                        state.pending_dd = true;
-                        needs_repaint = true;
-                        continue;
-                    }
-                    if lc == 'q' {
-                        return Ok(());
-                    }
-                    // Number keys: 1..9 jump to desktops 1..9, 0 jumps to desktop 10.
-                    if let Some(d) = c.to_digit(10) {
-                        let idx = if d == 0 { 9 } else { (d - 1) as usize };
-                        if idx < state.desktops.len() {
-                            ew_popup.switch_desktop(state.desktops[idx].index, ev.time)?;
-                            return Ok(());
-                        }
-                        continue;
-                    }
-                    if lc == 'j' || lc == 'k' {
-                        let delta: i32 = if lc == 'j' { 1 } else { -1 };
-                        // Shift+Ctrl+J/K on an app row: move that app one
-                        // desktop AND follow it (popup stays open). Checked
-                        // first so the plain-Shift branch below doesn't catch it.
-                        if shift && ctrl {
-                            if let Some(Row::App { window_idx, .. }) = layout.rows.get(state.cursor) {
-                                let wi = *window_idx;
-                                move_selected_app_and_follow(
-                                    &mut state, &ew_popup, wi, delta, ev.time,
-                                )?;
-                                needs_repaint = true;
-                            }
-                            continue;
-                        }
-                        // Shift+J/K: move the cursor-selected app one desktop,
-                        // popup stays open. On a header (nothing to move),
-                        // ignore the chord.
-                        if shift {
-                            if let Some(Row::App { window_idx, .. }) = layout.rows.get(state.cursor) {
-                                let wi = *window_idx;
-                                move_selected_app(&mut state, &ew_popup, wi, delta)?;
-                                needs_repaint = true;
-                            }
-                            continue;
-                        }
-                        move_cursor(&layout, &mut state, delta);
-                        needs_repaint = true;
-                        continue;
-                    }
-                }
-                match key {
-                    Key::Down => {
-                        move_cursor(&layout, &mut state, 1);
-                        needs_repaint = true;
-                    }
-                    Key::Up => {
-                        move_cursor(&layout, &mut state, -1);
-                        needs_repaint = true;
-                    }
-                    Key::Return => {
-                        activate_cursor(&popup, &ew_popup, &layout, &state, ev.time)?;
-                        return Ok(());
-                    }
-                    _ => {}
+                let m = u16::from(ev.state);
+                let mods = Mods {
+                    shift: m & u16::from(KeyButMask::SHIFT) != 0,
+                    ctrl: m & u16::from(KeyButMask::CONTROL) != 0,
+                    super_: m & u16::from(KeyButMask::MOD4) != 0,
+                };
+                let key = keymap.lookup(ev.detail, m);
+                match handle_keypress(&mut state, &ew, key, ev.time, mods)? {
+                    Outcome::Repaint => needs_repaint = true,
+                    Outcome::Close => return Ok(()),
+                    Outcome::Nothing => {}
                 }
             }
             Event::ButtonPress(ev) => {
-                // Click outside our window? Close.
                 if ev.event_x < 0
                     || ev.event_y < 0
                     || ev.event_x >= popup.w as i16
                     || ev.event_y >= popup.h as i16
                 {
-                    return Ok(());
+                    return Ok(()); // click outside the popup
                 }
-                // Inside clicks are ignored while the help overlay is up.
-                if state.show_help {
+                if state.show_help || ev.detail != 1 {
                     continue;
                 }
-                if ev.detail == 1 {
-                    let layout = Layout::build(
-                        &state.desktops,
-                        &state.windows,
-                        state.current_desktop,
-                        state.focused_window,
-                        state.pad_y,
-                        state.header_h,
-                        state.app_h,
-                    );
-                    if let Some(idx) = layout.row_at_y(ev.event_y as f64, state.scroll) {
-                        match layout.rows[idx] {
-                            Row::App { window_idx, .. } => {
-                                let win = &state.windows[window_idx];
-                                state.cursor = idx;
-                                state.drag = Some(Drag {
-                                    window_id: win.id,
-                                    label: drag_label(win),
-                                    cursor_x: ev.event_x as i32,
-                                    cursor_y: ev.event_y as i32,
-                                    target_desktop: None,
-                                    started: false,
-                                    press_x: ev.event_x as i32,
-                                    press_y: ev.event_y as i32,
-                                });
-                                needs_repaint = true;
-                            }
-                            Row::Header { desktop_idx, .. } => {
-                                // Click on a desktop header → switch and close.
-                                ew_popup.switch_desktop(state.desktops[desktop_idx].index, ev.time)?;
-                                return Ok(());
-                            }
-                        }
+                let layout = state.layout();
+                let Some(idx) = layout.row_at_y(ev.event_y as f64, state.scroll) else {
+                    continue;
+                };
+                match layout.rows[idx] {
+                    Row::App { window_idx, .. } => {
+                        let win = &state.windows[window_idx];
+                        state.cursor = idx;
+                        state.drag = Some(Drag {
+                            window_id: win.id,
+                            label: drag_label(win),
+                            cursor_x: ev.event_x as i32,
+                            cursor_y: ev.event_y as i32,
+                            target_desktop: None,
+                            press_x: ev.event_x as i32,
+                            press_y: ev.event_y as i32,
+                            started: false,
+                        });
+                        needs_repaint = true;
+                    }
+                    Row::Header { desktop_idx, .. } => {
+                        ew.switch_desktop(state.desktops[desktop_idx].index, ev.time)?;
+                        return Ok(());
                     }
                 }
             }
             Event::MotionNotify(ev) => {
-                if let Some(d) = state.drag.as_mut() {
-                    d.cursor_x = ev.event_x as i32;
-                    d.cursor_y = ev.event_y as i32;
-                    let dx = d.cursor_x - d.press_x;
-                    let dy = d.cursor_y - d.press_y;
-                    if !d.started && (dx * dx + dy * dy) > 16 {
-                        d.started = true;
-                    }
-                    let layout = Layout::build(
-                        &state.desktops,
-                        &state.windows,
-                        state.current_desktop,
-                        state.focused_window,
-                        state.pad_y,
-                        state.header_h,
-                        state.app_h,
-                    );
-                    d.target_desktop =
-                        layout.row_at_y(ev.event_y as f64, state.scroll).and_then(|i| {
-                            match layout.rows[i] {
-                                Row::Header { desktop_idx, .. } => {
-                                    Some(state.desktops[desktop_idx].index)
-                                }
-                                Row::App { window_idx, .. } => {
-                                    Some(state.windows[window_idx].desktop)
-                                }
-                            }
-                        });
-                    needs_repaint = true;
+                if state.drag.is_none() {
+                    continue;
                 }
+                // Resolve the target desktop first so we can drop the &state
+                // borrow before mutably touching state.drag.
+                let layout = state.layout();
+                let target = layout
+                    .row_at_y(ev.event_y as f64, state.scroll)
+                    .map(|i| match layout.rows[i] {
+                        Row::Header { desktop_idx, .. } => state.desktops[desktop_idx].index,
+                        Row::App { window_idx, .. } => state.windows[window_idx].desktop,
+                    });
+                let d = state.drag.as_mut().unwrap();
+                d.cursor_x = ev.event_x as i32;
+                d.cursor_y = ev.event_y as i32;
+                if !d.started && d.moved_enough() {
+                    d.started = true;
+                }
+                d.target_desktop = target;
+                needs_repaint = true;
             }
             Event::ButtonRelease(ev) => {
                 if ev.detail != 1 {
                     continue;
                 }
-                if let Some(d) = state.drag.take() {
-                    if d.started {
-                        if let Some(target) = d.target_desktop {
-                            ew_popup.move_window_to_desktop(d.window_id, target)?;
-                            return Ok(());
-                        }
-                        needs_repaint = true;
-                    } else {
-                        // Treat as click: activate the row.
-                        let layout = Layout::build(
-                            &state.desktops,
-                            &state.windows,
-                            state.current_desktop,
-                            state.focused_window,
-                            state.pad_y,
-                            state.header_h,
-                            state.app_h,
-                        );
-                        activate_cursor(&popup, &ew_popup, &layout, &state, ev.time)?;
+                let Some(d) = state.drag.take() else { continue };
+                if d.started {
+                    if let Some(target) = d.target_desktop {
+                        ew.move_window_to_desktop(d.window_id, target)?;
                         return Ok(());
                     }
+                    needs_repaint = true;
+                } else {
+                    // No real drag → treat as a click on the (already-selected) row.
+                    state.activate_cursor(&ew, ev.time)?;
+                    return Ok(());
                 }
             }
             Event::FocusOut(ev) => {
@@ -536,232 +481,167 @@ fn run_popup() -> Result<()> {
     }
 }
 
-fn initial_cursor(
-    layout: &Layout,
-    desktops: &[DesktopInfo],
-    windows: &[WindowInfo],
-    focused: Option<u32>,
-    current_desktop: u32,
-) -> usize {
-    if let Some(f) = focused {
-        for (i, row) in layout.rows.iter().enumerate() {
-            if let Row::App { window_idx, .. } = row {
-                if windows[*window_idx].id == f {
-                    return i;
-                }
-            }
-        }
-    }
-    for (i, row) in layout.rows.iter().enumerate() {
-        if let Row::Header { desktop_idx, .. } = row {
-            if desktops[*desktop_idx].index == current_desktop {
-                return i;
-            }
-        }
-    }
-    0
+#[derive(Clone, Copy)]
+struct Mods {
+    shift: bool,
+    ctrl: bool,
+    super_: bool,
 }
 
-fn move_cursor(layout: &Layout, state: &mut State, delta: i32) {
-    let n = layout.rows.len() as i32;
-    if n == 0 {
-        return;
-    }
-    let mut c = state.cursor as i32 + delta;
-    if c < 0 {
-        c = 0;
-    }
-    if c >= n {
-        c = n - 1;
-    }
-    state.cursor = c as usize;
-    ensure_cursor_visible(layout, state);
+enum Outcome {
+    Nothing,
+    Repaint,
+    Close,
 }
 
-fn ensure_cursor_visible(layout: &Layout, state: &mut State) {
-    if state.cursor >= layout.rows.len() {
-        state.cursor = layout.rows.len().saturating_sub(1);
-    }
-    if layout.rows.is_empty() {
-        state.scroll = 0.0;
-        return;
-    }
-    let y = layout.row_y[state.cursor];
-    let h = layout.row_h[state.cursor];
-    let viewport = state.viewport_h;
-    if y < state.scroll {
-        state.scroll = y;
-    } else if y + h > state.scroll + viewport {
-        state.scroll = y + h - viewport;
-    }
-    let max_scroll = (layout.content_h - viewport).max(0.0);
-    if state.scroll > max_scroll {
-        state.scroll = max_scroll;
-    }
-    if state.scroll < 0.0 {
-        state.scroll = 0.0;
-    }
-}
-
-/// Move the app at `window_idx` one desktop in `delta` direction. Updates
-/// local state so the next repaint reflects the move, and slides `state.cursor`
-/// onto the moved app's new row so the user can keep moving it further.
-fn move_selected_app(
+fn handle_keypress(
     state: &mut State,
     ew: &Ewmh,
-    window_idx: usize,
-    delta: i32,
-) -> Result<()> {
-    let n = state.desktops.len() as i32;
-    if n == 0 {
-        return Ok(());
-    }
-    let win = &state.windows[window_idx];
-    // EWMH "sticky" windows live on every desktop — skip the move.
-    if win.desktop == u32::MAX {
-        return Ok(());
-    }
-    let new_d = ((win.desktop as i32 + delta).rem_euclid(n)) as u32;
-    if new_d == win.desktop {
-        return Ok(());
-    }
-    ew.move_window_to_desktop(win.id, new_d)?;
-    state.windows[window_idx].desktop = new_d;
-
-    let layout = Layout::build(
-        &state.desktops,
-        &state.windows,
-        state.current_desktop,
-        state.focused_window,
-        state.pad_y,
-        state.header_h,
-        state.app_h,
-    );
-    for (i, row) in layout.rows.iter().enumerate() {
-        if let Row::App { window_idx: wi, .. } = row {
-            if *wi == window_idx {
-                state.cursor = i;
-                break;
-            }
-        }
-    }
-    ensure_cursor_visible(&layout, state);
-    Ok(())
-}
-
-/// Move the app at `window_idx` one desktop in `delta`, then switch to that
-/// desktop. Popup stays open: local state is updated and `state.cursor` moves
-/// onto the app's new row so the user can keep shoving it further.
-fn move_selected_app_and_follow(
-    state: &mut State,
-    ew: &Ewmh,
-    window_idx: usize,
-    delta: i32,
+    key: Key,
     time: u32,
-) -> Result<()> {
-    let n = state.desktops.len() as i32;
-    if n == 0 {
-        return Ok(());
+    mods: Mods,
+) -> Result<Outcome> {
+    // Help overlay is modal: only F1/Esc dismiss it, and Super+D / q remain
+    // unconditional popup-closers. Everything else is ignored.
+    if state.show_help {
+        let is_super_d =
+            matches!(key, Key::Char(c) if c.eq_ignore_ascii_case(&'d')) && mods.super_;
+        if is_super_d || matches!(key, Key::Char('q' | 'Q')) {
+            return Ok(Outcome::Close);
+        }
+        if matches!(key, Key::F1 | Key::Escape) {
+            state.show_help = false;
+            return Ok(Outcome::Repaint);
+        }
+        return Ok(Outcome::Nothing);
     }
-    let win = &state.windows[window_idx];
-    let target = if win.desktop == u32::MAX {
-        // Sticky — already on every desktop. Step from the current one.
-        ((state.current_desktop as i32 + delta).rem_euclid(n)) as u32
+
+    if matches!(key, Key::F1) {
+        state.show_help = true;
+        state.pending_dd = false;
+        state.pending_gg = false;
+        return Ok(Outcome::Repaint);
+    }
+    if matches!(key, Key::Escape) {
+        return Ok(Outcome::Close);
+    }
+
+    // Any non-`d` cancels pending `dd`; any non-`g` cancels pending `gg`.
+    let is_plain_d =
+        matches!(key, Key::Char(c) if c.eq_ignore_ascii_case(&'d')) && !mods.super_;
+    let is_plain_g = matches!(key, Key::Char('g'));
+    let mut repaint = false;
+    if state.pending_dd && !is_plain_d {
+        state.pending_dd = false;
+        repaint = true;
+    }
+    if state.pending_gg && !is_plain_g {
+        state.pending_gg = false;
+        repaint = true;
+    }
+
+    if let Key::Char(c) = key {
+        // gg → top. G (shift+g) → bottom. Case-sensitive — `G` is its own key.
+        if c == 'g' {
+            if state.pending_gg {
+                state.pending_gg = false;
+                state.jump_to(0);
+            } else {
+                state.pending_gg = true;
+            }
+            return Ok(Outcome::Repaint);
+        }
+        if c == 'G' {
+            state.jump_to(usize::MAX);
+            return Ok(Outcome::Repaint);
+        }
+
+        let lc = c.to_ascii_lowercase();
+        if lc == 'd' {
+            if mods.super_ {
+                return Ok(Outcome::Close); // Super+D toggles the popup off
+            }
+            if state.pending_dd {
+                state.pending_dd = false;
+                if let Some(wi) = state.cursor_window_idx() {
+                    state.close_app(ew, wi, time)?;
+                }
+                return Ok(Outcome::Repaint);
+            }
+            state.pending_dd = true;
+            return Ok(Outcome::Repaint);
+        }
+        if lc == 'q' {
+            return Ok(Outcome::Close);
+        }
+        // 1..9 → desktops 1..9, 0 → desktop 10.
+        if let Some(d) = c.to_digit(10) {
+            let idx = if d == 0 { 9 } else { (d - 1) as usize };
+            if idx < state.desktops.len() {
+                ew.switch_desktop(state.desktops[idx].index, time)?;
+                return Ok(Outcome::Close);
+            }
+            return Ok(if repaint { Outcome::Repaint } else { Outcome::Nothing });
+        }
+        if lc == 'j' || lc == 'k' {
+            let delta: i32 = if lc == 'j' { 1 } else { -1 };
+            if mods.shift {
+                // Shift+J/K: move the selected app one desktop. With Ctrl
+                // also held, follow the app to that desktop.
+                if let Some(wi) = state.cursor_window_idx() {
+                    state.move_app(ew, wi, delta, mods.ctrl, time)?;
+                    return Ok(Outcome::Repaint);
+                }
+                return Ok(if repaint { Outcome::Repaint } else { Outcome::Nothing });
+            }
+            state.move_cursor(delta);
+            return Ok(Outcome::Repaint);
+        }
+    }
+
+    match key {
+        Key::Down => {
+            state.move_cursor(1);
+            Ok(Outcome::Repaint)
+        }
+        Key::Up => {
+            state.move_cursor(-1);
+            Ok(Outcome::Repaint)
+        }
+        Key::Return => {
+            state.activate_cursor(ew, time)?;
+            Ok(Outcome::Close)
+        }
+        _ => Ok(if repaint { Outcome::Repaint } else { Outcome::Nothing }),
+    }
+}
+
+fn repaint(popup: &Popup, renderer: &mut Renderer, state: &State) -> Result<()> {
+    let pixels = if state.show_help {
+        renderer.draw_help(&state.cfg)?
     } else {
-        ((win.desktop as i32 + delta).rem_euclid(n)) as u32
+        let layout = state.layout();
+        let overlay = state
+            .drag
+            .as_ref()
+            .filter(|d| d.started)
+            .map(|d| DragOverlay {
+                cursor_x: d.cursor_x,
+                cursor_y: d.cursor_y,
+                label: d.label.clone(),
+                target_desktop: d.target_desktop,
+            });
+        renderer.draw(
+            &state.cfg,
+            &layout,
+            &state.desktops,
+            &state.windows,
+            state.cursor,
+            state.scroll,
+            overlay.as_ref(),
+        )?
     };
-
-    if win.desktop != u32::MAX && target != win.desktop {
-        ew.move_window_to_desktop(win.id, target)?;
-        state.windows[window_idx].desktop = target;
-    }
-    if target != state.current_desktop {
-        ew.switch_desktop(target, time)?;
-        state.current_desktop = target;
-    }
-
-    let layout = Layout::build(
-        &state.desktops,
-        &state.windows,
-        state.current_desktop,
-        state.focused_window,
-        state.pad_y,
-        state.header_h,
-        state.app_h,
-    );
-    for (i, row) in layout.rows.iter().enumerate() {
-        if let Row::App { window_idx: wi, .. } = row {
-            if *wi == window_idx {
-                state.cursor = i;
-                break;
-            }
-        }
-    }
-    ensure_cursor_visible(&layout, state);
+    popup.put(&pixels)?;
+    popup.flush()?;
     Ok(())
 }
-
-/// Send `_NET_CLOSE_WINDOW` to the app at `window_idx`, drop it from local
-/// state so the popup reflects the kill immediately, and keep the cursor on
-/// the same row index (clamped) so consecutive `dd`s walk down the list.
-fn close_selected_window(
-    state: &mut State,
-    ew: &Ewmh,
-    window_idx: usize,
-    time: u32,
-) -> Result<()> {
-    let win_id = state.windows[window_idx].id;
-    ew.close_window(win_id, time)?;
-    state.windows.remove(window_idx);
-    if state.focused_window == Some(win_id) {
-        state.focused_window = None;
-    }
-    let layout = Layout::build(
-        &state.desktops,
-        &state.windows,
-        state.current_desktop,
-        state.focused_window,
-        state.pad_y,
-        state.header_h,
-        state.app_h,
-    );
-    if state.cursor >= layout.rows.len() {
-        state.cursor = layout.rows.len().saturating_sub(1);
-    }
-    ensure_cursor_visible(&layout, state);
-    Ok(())
-}
-
-fn activate_cursor(_popup: &Popup, ew: &Ewmh, layout: &Layout, state: &State, time: u32) -> Result<()> {
-    if let Some(row) = layout.rows.get(state.cursor) {
-        match row {
-            Row::Header { desktop_idx, .. } => {
-                ew.switch_desktop(state.desktops[*desktop_idx].index, time)?;
-            }
-            Row::App { window_idx, .. } => {
-                let win = &state.windows[*window_idx];
-                // Jump to the app's desktop instead of pulling the app to the
-                // current one. u32::MAX means "sticky / on all desktops" —
-                // skip the switch in that case.
-                if win.desktop != u32::MAX && win.desktop != state.current_desktop {
-                    ew.switch_desktop(win.desktop, time)?;
-                }
-                ew.activate_window(win.id, time)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn drag_label(w: &WindowInfo) -> String {
-    if !w.class.is_empty() {
-        let mut chars = w.class.chars();
-        match chars.next() {
-            Some(c) => c.to_uppercase().chain(chars).collect(),
-            None => String::new(),
-        }
-    } else {
-        w.title.clone()
-    }
-}
-
