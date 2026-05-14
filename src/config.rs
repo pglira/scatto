@@ -17,6 +17,14 @@ max_height = 640
 # Background transparency. 0.0 = fully transparent, 1.0 = opaque.
 # Visible transparency requires a compositor (e.g. picom).
 opacity = 0.94
+# Border thickness in px. Set to 0 to disable the border.
+border_thickness = 1.0
+
+[row]
+# Height of each desktop header row in px.
+header_height = 30.0
+# Height of each app row in px.
+app_height = 28.0
 
 [font]
 # Any Pango font family.
@@ -88,6 +96,10 @@ pub struct Config {
     /// Background opacity (0.0 = transparent, 1.0 = opaque). Applied on top
     /// of whatever alpha `colors.background` had.
     pub opacity: f64,
+    /// Border thickness in px. 0.0 disables the border stroke.
+    pub border_thickness: f64,
+    pub header_height: f64,
+    pub app_height: f64,
     pub font_family: String,
     pub font_size: f64,
     pub bold_headers: bool,
@@ -101,6 +113,9 @@ impl Default for Config {
             width: 520,
             max_height: 640,
             opacity: 0.94,
+            border_thickness: 1.0,
+            header_height: 30.0,
+            app_height: 28.0,
             font_family: "Sans".to_string(),
             font_size: 13.0,
             bold_headers: true,
@@ -139,6 +154,21 @@ impl Config {
             if let Some(v) = w.max_height { cfg.max_height = v; }
             if let Some(v) = w.opacity {
                 cfg.opacity = v.clamp(0.0, 1.0);
+            }
+            if let Some(v) = w.border_thickness {
+                cfg.border_thickness = v.max(0.0);
+            }
+        }
+        if let Some(r) = raw.row {
+            if let Some(v) = r.header_height {
+                if v > 0.0 {
+                    cfg.header_height = v;
+                }
+            }
+            if let Some(v) = r.app_height {
+                if v > 0.0 {
+                    cfg.app_height = v;
+                }
             }
         }
         if let Some(f) = raw.font {
@@ -212,8 +242,15 @@ pub fn write_default_config() -> Result<PathBuf> {
 #[derive(Debug, Deserialize, Default)]
 struct Raw {
     window: Option<RawWindow>,
+    row: Option<RawRow>,
     font: Option<RawFont>,
     colors: Option<RawColors>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawRow {
+    header_height: Option<f64>,
+    app_height: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -221,6 +258,7 @@ struct RawWindow {
     width: Option<u16>,
     max_height: Option<u16>,
     opacity: Option<f64>,
+    border_thickness: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Default)]

@@ -9,9 +9,6 @@ use crate::ewmh::{DesktopInfo, WindowInfo};
 use crate::icon::surface_from_icon;
 
 pub const PAD_X: f64 = 16.0;
-pub const PAD_Y: f64 = 12.0;
-pub const HEADER_H: f64 = 30.0;
-pub const APP_H: f64 = 28.0;
 pub const APP_INDENT: f64 = 22.0;
 pub const ICON_SIZE: f64 = 18.0;
 
@@ -35,11 +32,14 @@ impl Layout {
         windows: &[WindowInfo],
         current_desktop: u32,
         focused_window: Option<u32>,
+        pad_y: f64,
+        header_h: f64,
+        app_h: f64,
     ) -> Self {
         let mut rows: Vec<Row> = Vec::new();
         let mut row_y = Vec::new();
         let mut row_h = Vec::new();
-        let mut y = PAD_Y;
+        let mut y = pad_y;
         for (di, d) in desktops.iter().enumerate() {
             // _NET_CLIENT_LIST_STACKING is bottom-to-top; reverse so the
             // most-recently-raised (focused) window is at the top of the list.
@@ -56,19 +56,19 @@ impl Layout {
                 empty: app_indices.is_empty(),
             });
             row_y.push(y);
-            row_h.push(HEADER_H);
-            y += HEADER_H;
+            row_h.push(header_h);
+            y += header_h;
             for wi in app_indices {
                 rows.push(Row::App {
                     window_idx: wi,
                     focused: focused_window == Some(windows[wi].id),
                 });
                 row_y.push(y);
-                row_h.push(APP_H);
-                y += APP_H;
+                row_h.push(app_h);
+                y += app_h;
             }
         }
-        y += PAD_Y;
+        y += pad_y;
         Self { rows, row_y, row_h, content_h: y }
     }
 
@@ -130,10 +130,13 @@ impl Renderer {
         set_rgba(&ctx, cfg.background_with_opacity());
         let _ = ctx.paint();
 
-        set_rgba(&ctx, cfg.theme.border);
-        ctx.set_line_width(1.0);
-        ctx.rectangle(0.5, 0.5, self.w as f64 - 1.0, self.h as f64 - 1.0);
-        let _ = ctx.stroke();
+        if cfg.border_thickness > 0.0 {
+            let lw = cfg.border_thickness;
+            set_rgba(&ctx, cfg.theme.border);
+            ctx.set_line_width(lw);
+            ctx.rectangle(lw / 2.0, lw / 2.0, self.w as f64 - lw, self.h as f64 - lw);
+            let _ = ctx.stroke();
+        }
 
         ctx.save().ok();
         ctx.rectangle(0.0, 0.0, self.w as f64, self.h as f64);
@@ -148,10 +151,11 @@ impl Renderer {
                 continue;
             }
 
+            let inset_x = cfg.border_thickness;
             let is_cursor = i == cursor;
             if is_cursor {
                 set_rgba(&ctx, cfg.theme.cursor);
-                ctx.rectangle(PAD_X * 0.5, y + 2.0, self.w as f64 - PAD_X, h - 4.0);
+                ctx.rectangle(inset_x, y, self.w as f64 - 2.0 * inset_x, h);
                 let _ = ctx.fill();
             }
 
@@ -159,7 +163,7 @@ impl Renderer {
                 if let Row::Header { desktop_idx, .. } = row {
                     if Some(desktops[*desktop_idx].index) == d.target_desktop {
                         set_rgba(&ctx, cfg.theme.drop_target);
-                        ctx.rectangle(PAD_X * 0.5, y + h - 2.0, self.w as f64 - PAD_X, 2.0);
+                        ctx.rectangle(inset_x, y + h - 2.0, self.w as f64 - 2.0 * inset_x, 2.0);
                         let _ = ctx.fill();
                     }
                 }
@@ -306,12 +310,13 @@ impl Renderer {
         if w < 60.0 {
             return;
         }
+        let app_h = cfg.app_height;
         ctx.set_source_rgba(0.12, 0.16, 0.22, 0.92);
-        ctx.rectangle(x, y, w, APP_H);
+        ctx.rectangle(x, y, w, app_h);
         let _ = ctx.fill();
         set_rgba(ctx, cfg.theme.drop_target);
         ctx.set_line_width(1.0);
-        ctx.rectangle(x + 0.5, y + 0.5, w - 1.0, APP_H - 1.0);
+        ctx.rectangle(x + 0.5, y + 0.5, w - 1.0, app_h - 1.0);
         let _ = ctx.stroke();
 
         let layout = pangocairo::functions::create_layout(ctx);
@@ -321,7 +326,7 @@ impl Renderer {
         layout.set_width(((w - 12.0) * pango::SCALE as f64) as i32);
         layout.set_ellipsize(pango::EllipsizeMode::End);
         set_rgba(ctx, cfg.theme.header_current);
-        let baseline = y + (APP_H - layout_height(&layout)) / 2.0;
+        let baseline = y + (app_h - layout_height(&layout)) / 2.0;
         ctx.move_to(x + 8.0, baseline);
         pangocairo::functions::show_layout(ctx, &layout);
     }

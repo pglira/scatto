@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::ewmh::{Atoms, DesktopInfo, Ewmh, WindowInfo};
 use crate::keymap::{Key, Keymap};
 use crate::popup::Popup;
-use crate::render::{DragOverlay, Layout, Renderer, Row, HEADER_H, PAD_Y};
+use crate::render::{DragOverlay, Layout, Renderer, Row};
 
 fn main() -> Result<()> {
     let arg = std::env::args().nth(1).unwrap_or_default();
@@ -97,6 +97,11 @@ struct State {
     scroll: f64,
     drag: Option<Drag>,
     viewport_h: f64,
+    /// Vertical padding above the first row and below the last row.
+    /// Set to `cfg.border_thickness` so rows sit flush against the border.
+    pad_y: f64,
+    header_h: f64,
+    app_h: f64,
     /// True after the first `d` of a vim-style `dd` close-window chord.
     /// Any non-`d` keypress clears it; the second `d` closes the selected
     /// app's window. `d` with Super held is the popup-toggle and bypasses this.
@@ -142,6 +147,9 @@ fn run_popup() -> Result<()> {
         scroll: 0.0,
         drag: None,
         viewport_h: 0.0,
+        pad_y: cfg.border_thickness,
+        header_h: cfg.header_height,
+        app_h: cfg.app_height,
         pending_dd: false,
     };
 
@@ -150,6 +158,9 @@ fn run_popup() -> Result<()> {
         &state.windows,
         state.current_desktop,
         state.focused_window,
+        state.pad_y,
+        state.header_h,
+        state.app_h,
     );
     state.cursor = initial_cursor(
         &layout,
@@ -159,7 +170,7 @@ fn run_popup() -> Result<()> {
         state.current_desktop,
     );
 
-    let content_h = (layout.content_h.ceil() as u16).max((HEADER_H + PAD_Y * 2.0) as u16);
+    let content_h = (layout.content_h.ceil() as u16).max((state.header_h + state.pad_y * 2.0) as u16);
     let height = content_h.min(cfg.max_height);
     state.viewport_h = height as f64;
 
@@ -198,6 +209,9 @@ fn run_popup() -> Result<()> {
                 &state.windows,
                 state.current_desktop,
                 state.focused_window,
+                state.pad_y,
+                state.header_h,
+                state.app_h,
             );
             ensure_cursor_visible(&layout, &mut state);
             let overlay = state.drag.as_ref().and_then(|d| {
@@ -248,6 +262,9 @@ fn run_popup() -> Result<()> {
                     &state.windows,
                     state.current_desktop,
                     state.focused_window,
+                    state.pad_y,
+                    state.header_h,
+                    state.app_h,
                 );
 
                 if matches!(key, Key::Escape) {
@@ -356,6 +373,9 @@ fn run_popup() -> Result<()> {
                         &state.windows,
                         state.current_desktop,
                         state.focused_window,
+                        state.pad_y,
+                        state.header_h,
+                        state.app_h,
                     );
                     if let Some(idx) = layout.row_at_y(ev.event_y as f64, state.scroll) {
                         match layout.rows[idx] {
@@ -397,6 +417,9 @@ fn run_popup() -> Result<()> {
                         &state.windows,
                         state.current_desktop,
                         state.focused_window,
+                        state.pad_y,
+                        state.header_h,
+                        state.app_h,
                     );
                     d.target_desktop =
                         layout.row_at_y(ev.event_y as f64, state.scroll).and_then(|i| {
@@ -430,6 +453,9 @@ fn run_popup() -> Result<()> {
                             &state.windows,
                             state.current_desktop,
                             state.focused_window,
+                            state.pad_y,
+                            state.header_h,
+                            state.app_h,
                         );
                         activate_cursor(&popup, &ew_popup, &layout, &state, ev.time)?;
                         return Ok(());
@@ -543,6 +569,9 @@ fn move_selected_app(
         &state.windows,
         state.current_desktop,
         state.focused_window,
+        state.pad_y,
+        state.header_h,
+        state.app_h,
     );
     for (i, row) in layout.rows.iter().enumerate() {
         if let Row::App { window_idx: wi, .. } = row {
@@ -592,6 +621,9 @@ fn move_selected_app_and_follow(
         &state.windows,
         state.current_desktop,
         state.focused_window,
+        state.pad_y,
+        state.header_h,
+        state.app_h,
     );
     for (i, row) in layout.rows.iter().enumerate() {
         if let Row::App { window_idx: wi, .. } = row {
@@ -625,6 +657,9 @@ fn close_selected_window(
         &state.windows,
         state.current_desktop,
         state.focused_window,
+        state.pad_y,
+        state.header_h,
+        state.app_h,
     );
     if state.cursor >= layout.rows.len() {
         state.cursor = layout.rows.len().saturating_sub(1);
