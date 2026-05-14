@@ -41,11 +41,14 @@ impl Layout {
         let mut row_h = Vec::new();
         let mut y = PAD_Y;
         for (di, d) in desktops.iter().enumerate() {
+            // _NET_CLIENT_LIST_STACKING is bottom-to-top; reverse so the
+            // most-recently-raised (focused) window is at the top of the list.
             let app_indices: Vec<usize> = windows
                 .iter()
                 .enumerate()
                 .filter(|(_, w)| w.desktop == d.index || w.desktop == u32::MAX)
                 .map(|(i, _)| i)
+                .rev()
                 .collect();
             rows.push(Row::Header {
                 desktop_idx: di,
@@ -268,11 +271,16 @@ impl Renderer {
         } else {
             cfg.theme.app.hex()
         };
-        let mut markup = format!(
+        let name_span = format!(
             "<span foreground=\"{}\">{}</span>",
             primary_color,
             escape_markup(&class_display)
         );
+        let mut markup = if cfg.bold_apps {
+            format!("<b>{}</b>", name_span)
+        } else {
+            name_span
+        };
         if let Some(t) = dim_title {
             let t = truncate(&t, 60);
             markup.push_str(&format!(

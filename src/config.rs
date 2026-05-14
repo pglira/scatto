@@ -25,6 +25,8 @@ family = "Sans"
 size = 13.0
 # Bold weight on desktop headers.
 bold_headers = true
+# Bold weight on app names (the secondary dim title stays regular).
+bold_apps = true
 
 [colors]
 # Hex strings: #RGB, #RGBA, #RRGGBB, or #RRGGBBAA. Alpha is honored
@@ -89,6 +91,7 @@ pub struct Config {
     pub font_family: String,
     pub font_size: f64,
     pub bold_headers: bool,
+    pub bold_apps: bool,
     pub theme: Theme,
 }
 
@@ -101,6 +104,7 @@ impl Default for Config {
             font_family: "Sans".to_string(),
             font_size: 13.0,
             bold_headers: true,
+            bold_apps: true,
             theme: Theme {
                 background: rgba(0.10, 0.11, 0.14, 1.0),
                 border: rgba(1.0, 1.0, 1.0, 0.08),
@@ -145,6 +149,7 @@ impl Config {
                 }
             }
             if let Some(v) = f.bold_headers { cfg.bold_headers = v; }
+            if let Some(v) = f.bold_apps { cfg.bold_apps = v; }
         }
         if let Some(c) = raw.colors {
             macro_rules! apply {
@@ -223,6 +228,7 @@ struct RawFont {
     family: Option<String>,
     size: Option<f64>,
     bold_headers: Option<bool>,
+    bold_apps: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]

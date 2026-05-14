@@ -92,6 +92,7 @@ opacity    = 0.94    # 0.0 = fully transparent, 1.0 = opaque
 family       = "Sans"   # any Pango font family
 size         = 13.0     # absolute px
 bold_headers = true     # bold weight on desktop headers
+bold_apps    = true     # bold weight on app names (dim title stays regular)
 
 [colors]
 # Each value is hex: #RGB, #RGBA, #RRGGBB, or #RRGGBBAA. The alpha byte
