@@ -305,7 +305,6 @@ fn draw_header(
     current: bool,
     empty: bool,
 ) {
-    let marker = if current { "●" } else { "○" };
     let name = if d.name.is_empty() {
         format!("Desktop {}", d.index + 1)
     } else {
@@ -320,9 +319,26 @@ fn draw_header(
     };
     set_rgba(ctx, color);
 
-    let layout = pango_layout(ctx, cfg, &format!("{}  {}", marker, name), cfg.bold_headers);
-    let baseline = y + (h - layout_height(&layout)) / 2.0;
-    ctx.move_to(PAD_X, baseline);
+    let layout = pango_layout(ctx, cfg, &name, cfg.bold_headers);
+    let text_top = y + (h - layout_height(&layout)) / 2.0;
+
+    // Marker circle is centered against the same logical text box we use to
+    // place the header label, which keeps it visually centered regardless of
+    // the specific glyph ink in a desktop name.
+    let cy = text_top + layout_height(&layout) / 2.0;
+    let radius = (cfg.font_size * 0.24).max(3.0);
+    let cx = PAD_X + radius;
+    ctx.new_path();
+    ctx.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+    if current {
+        let _ = ctx.fill();
+    } else {
+        ctx.set_line_width(1.2);
+        let _ = ctx.stroke();
+    }
+
+    let text_x = PAD_X + radius * 2.0 + 8.0;
+    ctx.move_to(text_x, text_top);
     pangocairo::functions::show_layout(ctx, &layout);
 }
 
