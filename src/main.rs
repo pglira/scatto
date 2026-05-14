@@ -106,6 +106,8 @@ struct State {
     /// Any non-`d` keypress clears it; the second `d` closes the selected
     /// app's window. `d` with Super held is the popup-toggle and bypasses this.
     pending_dd: bool,
+    /// True after the first `g` of a vim-style `gg` jump-to-top chord.
+    pending_gg: bool,
 }
 
 #[derive(Clone)]
@@ -151,6 +153,7 @@ fn run_popup() -> Result<()> {
         header_h: cfg.header_height,
         app_h: cfg.app_height,
         pending_dd: false,
+        pending_gg: false,
     };
 
     let layout = Layout::build(
@@ -277,7 +280,36 @@ fn run_popup() -> Result<()> {
                     state.pending_dd = false;
                     needs_repaint = true;
                 }
+                // Any non-`g` keypress cancels a pending `gg`.
+                let is_plain_g = matches!(key, Key::Char('g'));
+                if state.pending_gg && !is_plain_g {
+                    state.pending_gg = false;
+                    needs_repaint = true;
+                }
                 if let Key::Char(c) = key {
+                    // gg: jump to top. G (shift+g): jump to bottom. Case-sensitive.
+                    if c == 'g' {
+                        if state.pending_gg {
+                            state.pending_gg = false;
+                            if !layout.rows.is_empty() {
+                                state.cursor = 0;
+                                ensure_cursor_visible(&layout, &mut state);
+                                needs_repaint = true;
+                            }
+                            continue;
+                        }
+                        state.pending_gg = true;
+                        needs_repaint = true;
+                        continue;
+                    }
+                    if c == 'G' {
+                        if !layout.rows.is_empty() {
+                            state.cursor = layout.rows.len() - 1;
+                            ensure_cursor_visible(&layout, &mut state);
+                            needs_repaint = true;
+                        }
+                        continue;
+                    }
                     let lc = c.to_ascii_lowercase();
                     if lc == 'd' {
                         if super_held {

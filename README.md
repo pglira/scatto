@@ -26,6 +26,8 @@ pointer:
 ### Navigation
 
 - **j / k** (or **Down / Up**): move the cursor through the list.
+- **gg** (vim-style — two `g` presses) → jump to the first row.
+- **G** (shift+g) → jump to the last row.
 
 ### Switching desktops
 
