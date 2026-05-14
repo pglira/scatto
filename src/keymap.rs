@@ -18,6 +18,7 @@ pub enum Key {
     Escape,
     Up,
     Down,
+    F1,
     Other,
 }
 
@@ -70,6 +71,7 @@ fn keysym_to_key(sym: u32) -> Key {
         0xff1b => Key::Escape,
         0xff52 => Key::Up,
         0xff54 => Key::Down,
+        0xffbe => Key::F1,
         s if (0x20..0x7f).contains(&s) => Key::Char(char::from(s as u8)),
         _ => Key::Other,
     }

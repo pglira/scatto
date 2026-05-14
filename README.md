@@ -28,6 +28,8 @@ pointer:
 - **j / k** (or **Down / Up**): move the cursor through the list.
 - **gg** (vim-style — two `g` presses) → jump to the first row.
 - **G** (shift+g) → jump to the last row.
+- **F1** → toggle an in-popup cheatsheet of every key binding. Esc or F1
+  again returns to the row list; `q` and `Super+D` still close the popup.
 
 ### Switching desktops
 

@@ -108,6 +108,8 @@ struct State {
     pending_dd: bool,
     /// True after the first `g` of a vim-style `gg` jump-to-top chord.
     pending_gg: bool,
+    /// True while the F1 key-bindings overlay is shown.
+    show_help: bool,
 }
 
 #[derive(Clone)]
@@ -154,6 +156,7 @@ fn run_popup() -> Result<()> {
         app_h: cfg.app_height,
         pending_dd: false,
         pending_gg: false,
+        show_help: false,
     };
 
     let layout = Layout::build(
@@ -228,15 +231,19 @@ fn run_popup() -> Result<()> {
                     target_desktop: d.target_desktop,
                 })
             });
-            let pixels = renderer.draw(
-                &cfg,
-                &layout,
-                &state.desktops,
-                &state.windows,
-                state.cursor,
-                state.scroll,
-                overlay.as_ref(),
-            )?;
+            let pixels = if state.show_help {
+                renderer.draw_help(&cfg)?
+            } else {
+                renderer.draw(
+                    &cfg,
+                    &layout,
+                    &state.desktops,
+                    &state.windows,
+                    state.cursor,
+                    state.scroll,
+                    overlay.as_ref(),
+                )?
+            };
             popup.put(&pixels)?;
             popup.flush()?;
             needs_repaint = false;
@@ -270,6 +277,27 @@ fn run_popup() -> Result<()> {
                     state.app_h,
                 );
 
+                // Help overlay is modal: only F1/Esc dismiss it, and Super+D/q
+                // remain unconditional popup-closers. Everything else is ignored.
+                if state.show_help {
+                    let is_super_d = matches!(key, Key::Char(c) if c.eq_ignore_ascii_case(&'d'))
+                        && super_held;
+                    if is_super_d || matches!(key, Key::Char('q' | 'Q')) {
+                        return Ok(());
+                    }
+                    if matches!(key, Key::F1 | Key::Escape) {
+                        state.show_help = false;
+                        needs_repaint = true;
+                    }
+                    continue;
+                }
+                if matches!(key, Key::F1) {
+                    state.show_help = true;
+                    state.pending_dd = false;
+                    state.pending_gg = false;
+                    needs_repaint = true;
+                    continue;
+                }
                 if matches!(key, Key::Escape) {
                     return Ok(());
                 }
@@ -398,6 +426,10 @@ fn run_popup() -> Result<()> {
                     || ev.event_y >= popup.h as i16
                 {
                     return Ok(());
+                }
+                // Inside clicks are ignored while the help overlay is up.
+                if state.show_help {
+                    continue;
                 }
                 if ev.detail == 1 {
                     let layout = Layout::build(

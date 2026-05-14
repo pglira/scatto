@@ -12,6 +12,19 @@ pub const PAD_X: f64 = 16.0;
 pub const APP_INDENT: f64 = 22.0;
 pub const ICON_SIZE: f64 = 18.0;
 
+/// Two-column cheatsheet shown in the F1 help overlay.
+pub const BINDINGS: &[(&str, &str)] = &[
+    ("j / k, ↓ / ↑", "move cursor"),
+    ("gg / G", "jump to first / last row"),
+    ("Enter", "switch to desktop / focus app"),
+    ("1–9, 0", "jump to desktop 1–10"),
+    ("Shift+J / Shift+K", "move app one desktop down / up"),
+    ("Shift+Ctrl+J / Shift+Ctrl+K", "move app and follow"),
+    ("dd", "close window"),
+    ("F1", "toggle this help"),
+    ("Esc / q / Super+D", "close popup"),
+];
+
 /// Owned row kind so `Layout` doesn't borrow the desktop/window slices.
 #[derive(Clone, Copy, Debug)]
 pub enum Row {
@@ -123,7 +136,7 @@ impl Renderer {
         scroll: f64,
         drag: Option<&DragOverlay>,
     ) -> Result<Vec<u8>> {
-        let mut surface = ImageSurface::create(Format::ARgb32, self.w, self.h)
+        let surface = ImageSurface::create(Format::ARgb32, self.w, self.h)
             .map_err(|e| anyhow!("ImageSurface::create: {e}"))?;
         let ctx = Context::new(&surface).map_err(|e| anyhow!("Context::new: {e}"))?;
 
@@ -184,6 +197,76 @@ impl Renderer {
             self.draw_drag_ghost(&ctx, cfg, d);
         }
 
+        self.surface_to_bytes(surface, ctx)
+    }
+
+    pub fn draw_help(&mut self, cfg: &Config) -> Result<Vec<u8>> {
+        let surface = ImageSurface::create(Format::ARgb32, self.w, self.h)
+            .map_err(|e| anyhow!("ImageSurface::create: {e}"))?;
+        let ctx = Context::new(&surface).map_err(|e| anyhow!("Context::new: {e}"))?;
+
+        set_rgba(&ctx, cfg.background_with_opacity());
+        let _ = ctx.paint();
+
+        if cfg.border_thickness > 0.0 {
+            let lw = cfg.border_thickness;
+            set_rgba(&ctx, cfg.theme.border);
+            ctx.set_line_width(lw);
+            ctx.rectangle(lw / 2.0, lw / 2.0, self.w as f64 - lw, self.h as f64 - lw);
+            let _ = ctx.stroke();
+        }
+
+        ctx.save().ok();
+        ctx.rectangle(0.0, 0.0, self.w as f64, self.h as f64);
+        ctx.clip();
+
+        let mut y = cfg.border_thickness;
+        // Title.
+        let title_layout = pangocairo::functions::create_layout(&ctx);
+        let title_desc = make_font(cfg, true);
+        title_layout.set_font_description(Some(&title_desc));
+        title_layout.set_text("Key bindings");
+        set_rgba(&ctx, cfg.theme.header_current);
+        let title_baseline = y + (cfg.header_height - layout_height(&title_layout)) / 2.0;
+        ctx.move_to(PAD_X, title_baseline);
+        pangocairo::functions::show_layout(&ctx, &title_layout);
+        y += cfg.header_height;
+
+        // Two-column rows.
+        let key_col_w = (self.w as f64 * 0.45).max(180.0);
+        let desc_x = PAD_X + key_col_w;
+        for (keys, desc) in BINDINGS {
+            let row_h = cfg.app_height;
+            let key_layout = pangocairo::functions::create_layout(&ctx);
+            let key_desc_font = make_font(cfg, cfg.bold_apps);
+            key_layout.set_font_description(Some(&key_desc_font));
+            key_layout.set_text(keys);
+            key_layout.set_width((key_col_w * pango::SCALE as f64) as i32);
+            key_layout.set_ellipsize(pango::EllipsizeMode::End);
+            set_rgba(&ctx, cfg.theme.header);
+            let baseline = y + (row_h - layout_height(&key_layout)) / 2.0;
+            ctx.move_to(PAD_X, baseline);
+            pangocairo::functions::show_layout(&ctx, &key_layout);
+
+            let desc_layout = pangocairo::functions::create_layout(&ctx);
+            let desc_font = make_font(cfg, false);
+            desc_layout.set_font_description(Some(&desc_font));
+            desc_layout.set_text(desc);
+            let avail = self.w as f64 - desc_x - PAD_X;
+            desc_layout.set_width((avail * pango::SCALE as f64) as i32);
+            desc_layout.set_ellipsize(pango::EllipsizeMode::End);
+            set_rgba(&ctx, cfg.theme.app);
+            ctx.move_to(desc_x, baseline);
+            pangocairo::functions::show_layout(&ctx, &desc_layout);
+
+            y += row_h;
+        }
+        ctx.restore().ok();
+
+        self.surface_to_bytes(surface, ctx)
+    }
+
+    fn surface_to_bytes(&self, mut surface: ImageSurface, ctx: Context) -> Result<Vec<u8>> {
         surface.flush();
         // Cairo refuses to lend the raw buffer while any Context still
         // references the surface — drop ours before asking for pixels.
