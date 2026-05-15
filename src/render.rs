@@ -29,6 +29,7 @@ const BINDINGS: &[(&str, &str)] = &[
     ("Click", "switch to desktop / focus app"),
     ("Drag app onto desktop", "move app"),
     ("Shift+drag", "move app and follow"),
+    ("Middle-click app", "close window"),
     ("dd", "close window"),
     ("F1", "toggle this help"),
     ("Esc / q / Super+D", "close popup"),

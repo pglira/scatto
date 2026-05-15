@@ -93,6 +93,11 @@ struct State {
     pending_gg: bool,
     /// True while the F1 key-bindings overlay is shown.
     show_help: bool,
+    /// Window id under the cursor at middle-button press, awaiting release.
+    /// Cleared on release; if the release lands on the same window, that app
+    /// is closed. Holding the press while moving the pointer to a different
+    /// row cancels — same escape hatch as left-click activation.
+    middle_press: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -143,6 +148,7 @@ impl State {
             pending_dd: false,
             pending_gg: false,
             show_help: false,
+            middle_press: None,
         })
     }
 
@@ -467,13 +473,22 @@ fn run_popup() -> Result<()> {
                 {
                     return Ok(()); // click outside the popup
                 }
-                if state.show_help || ev.detail != 1 {
+                if state.show_help {
                     continue;
                 }
                 let layout = state.layout();
                 let Some(idx) = layout.row_at_y(ev.event_y as f64, state.scroll) else {
                     continue;
                 };
+                if ev.detail == 2 {
+                    if let Row::App { window_idx, .. } = layout.rows[idx] {
+                        state.middle_press = Some(state.windows[window_idx].id);
+                    }
+                    continue;
+                }
+                if ev.detail != 1 {
+                    continue;
+                }
                 match layout.rows[idx] {
                     Row::App { window_idx, .. } => {
                         let win = &state.windows[window_idx];
@@ -521,6 +536,21 @@ fn run_popup() -> Result<()> {
                 needs_repaint = true;
             }
             Event::ButtonRelease(ev) => {
+                if ev.detail == 2 {
+                    let pressed = state.middle_press.take();
+                    if let Some(id) = pressed {
+                        let layout = state.layout();
+                        if let Some(idx) = layout.row_at_y(ev.event_y as f64, state.scroll) {
+                            if let Row::App { window_idx, .. } = layout.rows[idx] {
+                                if state.windows[window_idx].id == id {
+                                    state.close_app(&ew, window_idx, ev.time)?;
+                                    needs_repaint = true;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if ev.detail != 1 {
                     continue;
                 }
