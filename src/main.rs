@@ -107,6 +107,10 @@ struct Drag {
     /// Latched true once the cursor has moved past a small threshold; below
     /// that we treat the gesture as a click instead.
     started: bool,
+    /// Shift held at press → on drop, also switch the user to the target
+    /// desktop. Latched at press so releasing shift mid-drag doesn't change
+    /// the action.
+    follow: bool,
 }
 
 impl Drag {
@@ -275,6 +279,20 @@ impl State {
         Ok(())
     }
 
+    /// Mouse-drop variant: move `window_idx` to an absolute `target` desktop,
+    /// un-stickying the app if it was on all desktops. Same-desktop drops are
+    /// a no-op so the popup just keeps the cursor where it lands.
+    fn drop_app(&mut self, ew: &Ewmh, window_idx: usize, target: u32) -> Result<()> {
+        let win = &self.windows[window_idx];
+        let sticky = win.desktop == u32::MAX;
+        if sticky || win.desktop != target {
+            ew.move_window_to_desktop(win.id, target)?;
+            self.windows[window_idx].desktop = target;
+        }
+        self.snap_cursor_to_window(window_idx);
+        Ok(())
+    }
+
     /// Ask the WM to close the app at `window_idx` (it gets a chance to save).
     /// Drop the row from local state so the popup reflects the kill immediately
     /// and the cursor walks naturally for repeated `dd`s.
@@ -414,6 +432,7 @@ fn run_popup() -> Result<()> {
                     Row::App { window_idx, .. } => {
                         let win = &state.windows[window_idx];
                         state.cursor = idx;
+                        let follow = u16::from(ev.state) & u16::from(KeyButMask::SHIFT) != 0;
                         state.drag = Some(Drag {
                             window_id: win.id,
                             label: drag_label(win),
@@ -423,6 +442,7 @@ fn run_popup() -> Result<()> {
                             press_x: ev.event_x as i32,
                             press_y: ev.event_y as i32,
                             started: false,
+                            follow,
                         });
                         needs_repaint = true;
                     }
@@ -461,8 +481,13 @@ fn run_popup() -> Result<()> {
                 let Some(d) = state.drag.take() else { continue };
                 if d.started {
                     if let Some(target) = d.target_desktop {
-                        ew.move_window_to_desktop(d.window_id, target)?;
-                        return Ok(());
+                        if let Some(wi) = state.windows.iter().position(|w| w.id == d.window_id) {
+                            state.drop_app(&ew, wi, target)?;
+                        }
+                        if d.follow && target != state.current_desktop {
+                            ew.switch_desktop(target, ev.time)?;
+                            state.current_desktop = target;
+                        }
                     }
                     needs_repaint = true;
                 } else {
