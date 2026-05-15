@@ -4,8 +4,8 @@
 use anyhow::{anyhow, Context, Result};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, GetPropertyReply, Window,
-    CLIENT_MESSAGE_EVENT,
+    AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, GetPropertyReply, PropMode,
+    Window, CLIENT_MESSAGE_EVENT,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -26,6 +26,7 @@ pub struct Atoms {
     pub net_wm_state: u32,
     pub net_wm_state_skip_taskbar: u32,
     pub net_close_window: u32,
+    pub net_wm_user_time: u32,
     pub utf8_string: u32,
 }
 
@@ -49,6 +50,7 @@ impl Atoms {
             net_wm_state: i(b"_NET_WM_STATE")?,
             net_wm_state_skip_taskbar: i(b"_NET_WM_STATE_SKIP_TASKBAR")?,
             net_close_window: i(b"_NET_CLOSE_WINDOW")?,
+            net_wm_user_time: i(b"_NET_WM_USER_TIME")?,
             utf8_string: i(b"UTF8_STRING")?,
         })
     }
@@ -237,6 +239,26 @@ impl<'a> Ewmh<'a> {
 
     pub fn activate_window(&self, w: Window, time: u32) -> Result<()> {
         self.send_message(self.root, w, self.atoms.net_active_window, [SOURCE_PAGER, time, 0, 0, 0])
+    }
+
+    /// Mark `w` as having been interacted with at `time` (writes
+    /// `_NET_WM_USER_TIME` on the target). Many WMs gate `_NET_ACTIVE_WINDOW`
+    /// on this property — without a fresh user-time the activate request can
+    /// be downgraded to a "demands attention" hint or silently dropped.
+    pub fn bump_user_time(&self, w: Window, time: u32) -> Result<()> {
+        self.conn
+            .change_property(
+                PropMode::REPLACE,
+                w,
+                self.atoms.net_wm_user_time,
+                u32::from(AtomEnum::CARDINAL),
+                32,
+                1,
+                &time.to_ne_bytes(),
+            )
+            .context("change_property _NET_WM_USER_TIME")?;
+        self.conn.flush()?;
+        Ok(())
     }
 
     /// Ask the WM to close `w` politely (the client gets a chance to save).

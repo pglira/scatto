@@ -107,9 +107,9 @@ struct Drag {
     /// Latched true once the cursor has moved past a small threshold; below
     /// that we treat the gesture as a click instead.
     started: bool,
-    /// Shift held at press → on drop, also switch the user to the target
-    /// desktop. Latched at press so releasing shift mid-drag doesn't change
-    /// the action.
+    /// Shift held at press → on drop, follow the app to its new desktop
+    /// (switching the user there) and make it the active window. Latched at
+    /// press so releasing shift mid-drag doesn't change the action.
     follow: bool,
 }
 
@@ -244,8 +244,9 @@ impl State {
     }
 
     /// Move the app at `window_idx` `delta` desktops. With `follow`, also
-    /// switches to that desktop so the popup stays open and the user can keep
-    /// shoving the app further. EWMH "sticky" apps (`desktop == u32::MAX`) are
+    /// switches to that desktop AND activates the moved app — the intent is
+    /// "bring this app with me", so the user lands on the new desktop with
+    /// the moved app focused. EWMH "sticky" apps (`desktop == u32::MAX`) are
     /// left alone without `follow`; with `follow`, only the desktop changes.
     fn move_app(
         &mut self,
@@ -271,26 +272,71 @@ impl State {
             ew.move_window_to_desktop(win_id, target)?;
             self.windows[window_idx].desktop = target;
         }
-        if follow && target != self.current_desktop {
-            ew.switch_desktop(target, time)?;
-            self.current_desktop = target;
+        if follow {
+            self.activate_app(ew, win_id, target, time)?;
+        } else {
+            self.refresh_focus(ew);
         }
         self.snap_cursor_to_window(window_idx);
         Ok(())
     }
 
-    /// Mouse-drop variant: move `window_idx` to an absolute `target` desktop,
-    /// un-stickying the app if it was on all desktops. Same-desktop drops are
-    /// a no-op so the popup just keeps the cursor where it lands.
-    fn drop_app(&mut self, ew: &Ewmh, window_idx: usize, target: u32) -> Result<()> {
+    /// Mouse-drop variant: move `window_idx` to absolute `target` desktop,
+    /// un-stickying if needed. Activates the moved app when it ends up in
+    /// front of the user (either because `follow` brought the user along,
+    /// or because the drop landed on the current desktop). Drops to other
+    /// desktops without `follow` leave focus alone.
+    fn drop_app(
+        &mut self,
+        ew: &Ewmh,
+        window_idx: usize,
+        target: u32,
+        follow: bool,
+        time: u32,
+    ) -> Result<()> {
         let win = &self.windows[window_idx];
+        let win_id = win.id;
         let sticky = win.desktop == u32::MAX;
         if sticky || win.desktop != target {
-            ew.move_window_to_desktop(win.id, target)?;
+            ew.move_window_to_desktop(win_id, target)?;
             self.windows[window_idx].desktop = target;
+        }
+        // Activate the moved app when it's now in front of the user — either
+        // because we followed (shift+drag) or because the drop landed on the
+        // current desktop. The plain "drag away" case (target on another
+        // desktop) deliberately does NOT activate, so focus doesn't migrate
+        // to an invisible window.
+        if follow || target == self.current_desktop {
+            self.activate_app(ew, win_id, target, time)?;
+        } else {
+            self.refresh_focus(ew);
         }
         self.snap_cursor_to_window(window_idx);
         Ok(())
+    }
+
+    /// Activate `win_id` (now living on `target`) and update local state to
+    /// match. A single `_NET_ACTIVE_WINDOW` handles desktop switch + raise +
+    /// focus atomically; sending a separate `_NET_CURRENT_DESKTOP` first
+    /// would race with the WM's auto-focus pipeline. `_NET_WM_USER_TIME` is
+    /// bumped first to defuse focus-stealing prevention on WMs that gate
+    /// activate requests on the target's last-interaction timestamp.
+    fn activate_app(&mut self, ew: &Ewmh, win_id: u32, target: u32, time: u32) -> Result<()> {
+        let _ = ew.bump_user_time(win_id, time);
+        ew.activate_window(win_id, time)?;
+        self.current_desktop = target;
+        self.focused_window = Some(win_id);
+        Ok(())
+    }
+
+    /// Re-read `_NET_ACTIVE_WINDOW` after a WM operation that might have
+    /// shifted focus (moving the active app off the current desktop, or
+    /// switching desktops). On error we keep the stale value rather than
+    /// blanking the "focused" badge.
+    fn refresh_focus(&mut self, ew: &Ewmh) {
+        if let Ok(w) = ew.active_window() {
+            self.focused_window = w;
+        }
     }
 
     /// Ask the WM to close the app at `window_idx` (it gets a chance to save).
@@ -482,11 +528,7 @@ fn run_popup() -> Result<()> {
                 if d.started {
                     if let Some(target) = d.target_desktop {
                         if let Some(wi) = state.windows.iter().position(|w| w.id == d.window_id) {
-                            state.drop_app(&ew, wi, target)?;
-                        }
-                        if d.follow && target != state.current_desktop {
-                            ew.switch_desktop(target, ev.time)?;
-                            state.current_desktop = target;
+                            state.drop_app(&ew, wi, target, d.follow, ev.time)?;
                         }
                     }
                     needs_repaint = true;

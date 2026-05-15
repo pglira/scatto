@@ -81,9 +81,16 @@ impl Layout {
             row_h.push(header_h);
             y += header_h;
             for wi in app_indices {
+                // The "focused" badge means "the active app on the current
+                // desktop". Hide it when the WM-reported active window lives
+                // on another desktop — common after dragging the active app
+                // away without follow, where the WM keeps focus on the moved
+                // window even though it's now invisible to the user.
+                let on_current = windows[wi].desktop == current_desktop
+                    || windows[wi].desktop == u32::MAX;
                 rows.push(Row::App {
                     window_idx: wi,
-                    focused: focused_window == Some(windows[wi].id),
+                    focused: focused_window == Some(windows[wi].id) && on_current,
                 });
                 row_y.push(y);
                 row_h.push(app_h);
