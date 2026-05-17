@@ -638,6 +638,20 @@ fn handle_keypress(
     }
 
     if let Key::Char(c) = key {
+        // Single-key app hint. Hints fire only with no modifiers — the pool
+        // (`f s a r e w t v c x b z h l n m u i o p y`, see render.rs) was
+        // chosen to avoid every already-bound letter, so a hint key plus
+        // shift/ctrl/super was clearly not aimed at jumping. Lowercase before
+        // lookup so caps-lock doesn't disable the feature.
+        if !mods.shift && !mods.ctrl && !mods.super_ {
+            let layout = state.layout();
+            if let Some(row_idx) = layout.row_idx_for_hint(c.to_ascii_lowercase()) {
+                state.cursor = row_idx;
+                state.activate_cursor(ew, time)?;
+                return Ok(Outcome::Close);
+            }
+        }
+
         // gg → top. G (shift+g) → bottom. Case-sensitive — `G` is its own key.
         if c == 'g' {
             if state.pending_gg {

@@ -50,6 +50,8 @@ header         = "#d9d9e6d9"
 app            = "#e8e8ee"
 app_focused    = "#ffd166"
 app_dim        = "#9c9ca8"
+# Single-key jump hint shown in square brackets on the left of each row.
+hint           = "#ffd166"
 "##;
 
 use anyhow::{anyhow, Context, Result};
@@ -88,6 +90,7 @@ pub struct Theme {
     pub app: Rgba,
     pub app_focused: Rgba,
     pub app_dim: Rgba,
+    pub hint: Rgba,
 }
 
 pub struct Config {
@@ -131,6 +134,7 @@ impl Default for Config {
                 app: hex("#e8e8ee"),
                 app_focused: hex("#ffd166"),
                 app_dim: hex("#9c9ca8"),
+                hint: hex("#ffd166"),
             },
         }
     }
@@ -200,6 +204,7 @@ impl Config {
             apply!(app);
             apply!(app_focused);
             apply!(app_dim);
+            apply!(hint);
         }
         Ok(cfg)
     }
@@ -282,6 +287,7 @@ struct RawColors {
     app: Option<String>,
     app_focused: Option<String>,
     app_dim: Option<String>,
+    hint: Option<String>,
 }
 
 fn rgba(r: f64, g: f64, b: f64, a: f64) -> Rgba {

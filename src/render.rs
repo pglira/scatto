@@ -9,7 +9,7 @@ use crate::ewmh::{DesktopInfo, WindowInfo};
 use crate::icon::surface_from_icon;
 
 const PAD_X: f64 = 16.0;
-const APP_INDENT: f64 = 22.0;
+const APP_INDENT: f64 = 32.0;
 const ICON_SIZE: f64 = 18.0;
 /// Gap between icon and text in app rows.
 const ICON_TEXT_GAP: f64 = 10.0;
@@ -17,6 +17,17 @@ const ICON_TEXT_GAP: f64 = 10.0;
 const TITLE_MAX_CHARS: usize = 60;
 /// Thickness of the green drop-target underline on a desktop header.
 const DROP_UNDERLINE_H: f64 = 2.0;
+
+/// Single-key hints assigned to app rows in row order. Priority is
+/// left-hand-first (mouse-on-right) and within each hand home-row →
+/// top-row → bottom-row → index → ring → pinky. Already-bound keys
+/// (`j k g d q 0–9`) are excluded. See `docs/adr/0001-single-key-app-hints.md`.
+const HINT_KEYS: &[char] = &[
+    // left hand
+    'f', 's', 'a', 'r', 'e', 'w', 't', 'v', 'c', 'x', 'b', 'z',
+    // right-hand spillover
+    'h', 'l', 'n', 'm', 'u', 'i', 'o', 'p', 'y',
+];
 
 /// Two-column cheatsheet shown in the F1 help overlay.
 const BINDINGS: &[(&str, &str)] = &[
@@ -26,6 +37,7 @@ const BINDINGS: &[(&str, &str)] = &[
     ("1–9, 0", "jump to desktop 1–10"),
     ("Shift+J / Shift+K", "move app one desktop down / up"),
     ("Shift+Ctrl+J / Shift+Ctrl+K", "move app and follow"),
+    ("hint letter (left of icon)", "jump to that app"),
     ("Click", "switch to desktop / focus app"),
     ("Drag app onto desktop", "move app"),
     ("Shift+drag", "move app and follow"),
@@ -39,7 +51,7 @@ const BINDINGS: &[(&str, &str)] = &[
 #[derive(Clone, Copy, Debug)]
 pub enum Row {
     Header { desktop_idx: usize, current: bool, empty: bool },
-    App { window_idx: usize, focused: bool },
+    App { window_idx: usize, focused: bool, hint: Option<char> },
 }
 
 pub struct Layout {
@@ -63,6 +75,9 @@ impl Layout {
         let mut row_y = Vec::new();
         let mut row_h = Vec::new();
         let mut y = pad_y;
+        // Sequential hint assignment in row order across all desktops. Apps
+        // past the 21st get no hint and are reached via j/k or click.
+        let mut hint_pool = HINT_KEYS.iter().copied();
         for (di, d) in desktops.iter().enumerate() {
             // _NET_CLIENT_LIST_STACKING is bottom-to-top; reverse so the
             // most-recently-raised (focused) window is at the top of the list.
@@ -92,6 +107,7 @@ impl Layout {
                 rows.push(Row::App {
                     window_idx: wi,
                     focused: focused_window == Some(windows[wi].id) && on_current,
+                    hint: hint_pool.next(),
                 });
                 row_y.push(y);
                 row_h.push(app_h);
@@ -100,6 +116,11 @@ impl Layout {
         }
         y += pad_y;
         Self { rows, row_y, row_h, content_h: y }
+    }
+
+    /// Row index for a hint, used to move the cursor before activating.
+    pub fn row_idx_for_hint(&self, ch: char) -> Option<usize> {
+        self.rows.iter().position(|r| matches!(*r, Row::App { hint: Some(h), .. } if h == ch))
     }
 
     pub fn row_at_y(&self, y_in_window: f64, scroll: f64) -> Option<usize> {
@@ -193,9 +214,9 @@ impl Renderer {
                 Row::Header { desktop_idx, current, empty } => {
                     draw_header(&ctx, cfg, y, row_h, &desktops[desktop_idx], current, empty);
                 }
-                Row::App { window_idx, focused } => {
+                Row::App { window_idx, focused, hint } => {
                     let icon = self.icon_for(&windows[window_idx]);
-                    draw_app(&ctx, cfg, y, row_h, &windows[window_idx], focused, icon, w);
+                    draw_app(&ctx, cfg, y, row_h, &windows[window_idx], focused, hint, icon, w);
                 }
             }
         }
@@ -360,9 +381,13 @@ fn draw_app(
     h: f64,
     w: &WindowInfo,
     focused: bool,
+    hint: Option<char>,
     icon: Option<&ImageSurface>,
     win_w: f64,
 ) {
+    if let Some(ch) = hint {
+        draw_hint(ctx, cfg, y, h, ch);
+    }
     let ix = PAD_X + APP_INDENT;
     let iy = y + (h - ICON_SIZE) / 2.0;
     draw_icon(ctx, icon, ix, iy);
@@ -394,6 +419,19 @@ fn draw_app(
     ellipsize(&layout, win_w - text_x - PAD_X);
     let baseline = y + (h - layout_height(&layout)) / 2.0;
     ctx.move_to(text_x, baseline);
+    pangocairo::functions::show_layout(ctx, &layout);
+}
+
+/// Renders the single-key hint character in the row's left inset (the
+/// `APP_INDENT` slot that would otherwise be empty padding). Bold + the
+/// accent color so it reads as the action handle, not part of the title.
+fn draw_hint(ctx: &Context, cfg: &Config, y: f64, h: f64, ch: char) {
+    let layout = pango_layout(ctx, cfg, &format!("[{}]", ch), true);
+    let (ink, _) = layout.pixel_extents();
+    let badge_x = PAD_X + (APP_INDENT - ink.width() as f64) / 2.0 - ink.x() as f64;
+    let baseline = y + (h - layout_height(&layout)) / 2.0;
+    set_rgba(ctx, cfg.theme.hint);
+    ctx.move_to(badge_x, baseline);
     pangocairo::functions::show_layout(ctx, &layout);
 }
 
