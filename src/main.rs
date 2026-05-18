@@ -322,13 +322,19 @@ impl State {
     }
 
     /// Activate `win_id` (now living on `target`) and update local state to
-    /// match. A single `_NET_ACTIVE_WINDOW` handles desktop switch + raise +
-    /// focus atomically; sending a separate `_NET_CURRENT_DESKTOP` first
-    /// would race with the WM's auto-focus pipeline. `_NET_WM_USER_TIME` is
-    /// bumped first to defuse focus-stealing prevention on WMs that gate
-    /// activate requests on the target's last-interaction timestamp.
+    /// match. We explicitly switch the user to `target` first so that when
+    /// `_NET_ACTIVE_WINDOW` arrives the window is already on the user's
+    /// current desktop — some WMs otherwise interpret activate-on-other-
+    /// desktop as "pull the window to the user", which silently reverts our
+    /// preceding `_NET_WM_DESKTOP` move. `_NET_WM_USER_TIME` is bumped first
+    /// to defuse focus-stealing prevention; that bump also keeps the
+    /// auto-focus race after the desktop switch from picking a different
+    /// window than ours.
     fn activate_app(&mut self, ew: &Ewmh, win_id: u32, target: u32, time: u32) -> Result<()> {
         let _ = ew.bump_user_time(win_id, time);
+        if target != self.current_desktop {
+            ew.switch_desktop(target, time)?;
+        }
         ew.activate_window(win_id, time)?;
         self.current_desktop = target;
         self.focused_window = Some(win_id);
