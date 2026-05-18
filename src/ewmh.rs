@@ -241,6 +241,21 @@ impl<'a> Ewmh<'a> {
         self.send_message(self.root, w, self.atoms.net_active_window, [SOURCE_PAGER, time, 0, 0, 0])
     }
 
+    /// Raise `w` to the top of its stack. `_NET_ACTIVE_WINDOW` only changes
+    /// focus — Xfwm4 (with `raise_on_focus = false`) and some other WMs leave
+    /// stacking untouched, so the activated window can stay hidden behind
+    /// the previously-raised one on the destination desktop. An explicit
+    /// `ConfigureWindow` with `StackMode::ABOVE` makes the activation
+    /// visually match the focus state.
+    pub fn raise_window(&self, w: Window) -> Result<()> {
+        use x11rb::protocol::xproto::{ConfigureWindowAux, StackMode};
+        self.conn
+            .configure_window(w, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))
+            .context("configure_window raise")?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
     /// Mark `w` as having been interacted with at `time` (writes
     /// `_NET_WM_USER_TIME` on the target). Many WMs gate `_NET_ACTIVE_WINDOW`
     /// on this property — without a fresh user-time the activate request can

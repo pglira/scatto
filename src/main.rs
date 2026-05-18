@@ -336,6 +336,10 @@ impl State {
             ew.switch_desktop(target, time)?;
         }
         ew.activate_window(win_id, time)?;
+        // Xfwm4 with `raise_on_focus = false` (and some other WMs) won't
+        // raise on activate, so the focused window can stay hidden behind
+        // whatever was previously on top of the destination desktop.
+        let _ = ew.raise_window(win_id);
         self.current_desktop = target;
         self.focused_window = Some(win_id);
         Ok(())
@@ -369,7 +373,7 @@ impl State {
         Ok(())
     }
 
-    fn activate_cursor(&self, ew: &Ewmh, time: u32) -> Result<()> {
+    fn activate_cursor(&mut self, ew: &Ewmh, time: u32) -> Result<()> {
         let layout = self.layout();
         let Some(row) = layout.rows.get(self.cursor) else {
             return Ok(());
@@ -380,13 +384,15 @@ impl State {
             }
             Row::App { window_idx, .. } => {
                 let win = &self.windows[window_idx];
-                // Jump to the app's desktop instead of pulling the app to the
-                // current one. u32::MAX means "sticky / on all desktops" —
-                // skip the switch in that case.
-                if win.desktop != u32::MAX && win.desktop != self.current_desktop {
-                    ew.switch_desktop(win.desktop, time)?;
-                }
-                ew.activate_window(win.id, time)?;
+                // For sticky windows (`u32::MAX`) the "target" is wherever the
+                // user already is — don't switch, just focus.
+                let target = if win.desktop == u32::MAX {
+                    self.current_desktop
+                } else {
+                    win.desktop
+                };
+                let win_id = win.id;
+                self.activate_app(ew, win_id, target, time)?;
             }
         }
         Ok(())
